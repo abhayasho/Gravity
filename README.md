@@ -1,5 +1,7 @@
 # Earth Orbital Debris Viewer
 
+![Earth orbital debris visualization](preview.png)
+
 A 3D WebGL experience that visualizes Earth and the cloud of artificial objects orbiting it with a glowing, geometric aesthetic. The scene shows a stylized Earth, the Moon, and thousands of catalogued man‑made objects (satellites, space stations, rocket bodies, and debris).
 
 Internally the app simulates **~5,200** orbiting objects:
