@@ -11,6 +11,64 @@ const timeEnd = (label) => DEBUG && console.timeEnd('[Gravity] ' + label);
 
 log('module loaded, Three.js version:', THREE.REVISION);
 
+const SOUND_STORAGE_KEY = 'gravity-sound';
+
+const soundController = {
+  ctx: null,
+  masterGain: null,
+  enabled: false,
+  init() {
+    try {
+      this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      this.masterGain = this.ctx.createGain();
+      this.masterGain.gain.value = 0.2;
+      this.masterGain.connect(this.ctx.destination);
+      this.enabled = localStorage.getItem(SOUND_STORAGE_KEY) === 'true';
+    } catch (e) {
+      log('Audio not available:', e.message);
+    }
+  },
+  setEnabled(on) {
+    this.enabled = !!on;
+    try {
+      localStorage.setItem(SOUND_STORAGE_KEY, on ? 'true' : 'false');
+    } catch (_) {}
+  },
+  playClick() {
+    if (!this.enabled || !this.ctx || !this.masterGain) return;
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.frequency.value = 520;
+    osc.type = 'sine';
+    gain.gain.setValueAtTime(0.08, this.ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.06);
+    osc.start(this.ctx.currentTime);
+    osc.stop(this.ctx.currentTime + 0.06);
+  },
+  playAmbient() {
+    if (!this.enabled || !this.ctx || !this.masterGain || this._ambient) return;
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.frequency.value = 55;
+    osc.type = 'sine';
+    gain.gain.value = 0.015;
+    osc.start(this.ctx.currentTime);
+    this._ambient = { osc, gain };
+  },
+  stopAmbient() {
+    if (this._ambient) {
+      this._ambient.osc.stop();
+      this._ambient = null;
+    }
+  },
+};
+
 const EARTH_RADIUS_KM = 6371;
 const MOON_DISTANCE_KM = 384400;
 const MU_KM = 398600.4418; // km^3/s^2
@@ -18,10 +76,69 @@ const MU_KM = 398600.4418; // km^3/s^2
 function getObjectType(name) {
   const n = (name || '').toUpperCase();
   if (n.includes('MOON')) return 'Natural satellite';
-  if (n.includes(' DEB') || n.includes('DEBRIS') || n.includes(' DEB ')) return 'Space debris';
+  if (n.includes(' DEB') || n.includes('DEBRIS') || n.includes(' DEB ') || n.includes('FRAG') || n.includes('MLI') || n.includes('SRM')) return 'Debris';
+  if (n.includes('R/B') || n.includes('Rocket body') || n.includes('ROCKET BODY')) return 'Rocket body';
+  if (n.includes('Payload') || n.includes('PAYLOAD')) return 'Payload';
   if (n.includes('ISS') || n.includes('TIANHE') || n.includes('CSS') || n.includes('STATION')) return 'Space station';
   if (n.includes('STARLINK') || n.includes('DRAGON') || n.includes('PROGRESS') || n.includes('SOYUZ') || n.includes('SHENZHOU') || n.includes('CYGNUS') || n.includes('HTV')) return 'Satellite / spacecraft';
   return 'Satellite';
+}
+
+function parseTLELine1(line1) {
+  const year2 = parseInt(line1.substring(18, 20), 10);
+  const year = year2 >= 57 ? 1900 + year2 : 2000 + year2;
+  const dayOfYear = parseFloat(line1.substring(20, 32), 10);
+  const epochMs = new Date(year, 0, 1).getTime() + (dayOfYear - 1) * 86400 * 1000;
+  return epochMs / 1000;
+}
+
+function parseTLELine2(line2) {
+  const inc = parseFloat(line2.substring(8, 16), 10);
+  const raan = parseFloat(line2.substring(17, 25), 10);
+  const eStr = '0.' + line2.substring(26, 33).trim().replace(/\s/g, '0');
+  const e = parseFloat(eStr, 10);
+  const argPeri = parseFloat(line2.substring(34, 42), 10);
+  const M = parseFloat(line2.substring(43, 51), 10);
+  const meanMotion = parseFloat(line2.substring(52, 63), 10);
+  return { INCLINATION: inc, RA_OF_ASC_NODE: raan, ECCENTRICITY: e, ARG_OF_PERICENTER: argPeri, MEAN_ANOMALY: M, MEAN_MOTION: meanMotion, epochSec: null };
+}
+
+function parseTLE(text) {
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const result = [];
+  for (let i = 0; i < lines.length - 2; i++) {
+    const l0 = lines[i];
+    const l1 = lines[i + 1];
+    const l2 = lines[i + 2];
+    if (l1.startsWith('1 ') && l2.startsWith('2 ')) {
+      const name = l0.substring(0, 24).trim();
+      const epochSec = parseTLELine1(l1);
+      const el = parseTLELine2(l2);
+      el.epochSec = epochSec;
+      result.push({ name, line1: l1, line2: l2, el });
+      i += 2;
+    }
+  }
+  return result;
+}
+
+function tleToOrbit(el) {
+  const epochSec = el.epochSec || 0;
+  const periodSec = 86400 / el.MEAN_MOTION;
+  const t0 = Date.now() / 1000 - epochSec;
+  return (t) => {
+    const tSinceEpoch = t0 + t;
+    const M_rad = (el.MEAN_ANOMALY * Math.PI / 180) + (2 * Math.PI * tSinceEpoch) / periodSec;
+    const elements = {
+      MEAN_MOTION: el.MEAN_MOTION,
+      INCLINATION: el.INCLINATION,
+      RA_OF_ASC_NODE: el.RA_OF_ASC_NODE,
+      ARG_OF_PERICENTER: el.ARG_OF_PERICENTER,
+      ECCENTRICITY: el.ECCENTRICITY,
+      MEAN_ANOMALY: (M_rad * 180 / Math.PI),
+    };
+    return orbitPositionFromElements(elements, 0);
+  };
 }
 
 function orbitPositionFromElements(el, t) {
@@ -134,6 +251,9 @@ function buildMoonItem() {
 }
 
 const N_SYNTHETIC = 5200;
+const TLE_MAX_OBJECTS = 4500;
+const CELESTRAK_URL = 'https://celestrak.org/NORAD/elements/gp.php?GROUP=last-30-days&FORMAT=tle';
+
 function loadOrbitalDataSync() {
   time('loadOrbitalDataSync');
   const items = [buildMoonItem()];
@@ -162,8 +282,37 @@ function loadOrbitalDataSync() {
   return items;
 }
 
+async function loadOrbitalDataAsync() {
+  try {
+    time('fetch TLE');
+    const res = await fetch(CELESTRAK_URL);
+    if (!res.ok) throw new Error(res.statusText);
+    const text = await res.text();
+    timeEnd('fetch TLE');
+    const parsed = parseTLE(text);
+    const items = [buildMoonItem()];
+    const limit = Math.min(parsed.length, TLE_MAX_OBJECTS);
+    for (let i = 0; i < limit; i++) {
+      const { name, el } = parsed[i];
+      const periodSec = 86400 / el.MEAN_MOTION;
+      const a_km = Math.pow(MU_KM * (periodSec / (2 * Math.PI)) ** 2, 1 / 3);
+      items.push({
+        name,
+        type: getObjectType(name),
+        orbit: tleToOrbit(el),
+        a: a_km,
+      });
+    }
+    log('orbital data: %d objects (Moon + %d from TLE)', items.length, limit);
+    return items;
+  } catch (err) {
+    log('TLE fetch failed, using synthetic data:', err.message);
+    return loadOrbitalDataSync();
+  }
+}
+
 function loadOrbitalData() {
-  return loadOrbitalDataSync();
+  return loadOrbitalDataAsync();
 }
 
 function createEarth(scene) {
@@ -308,8 +457,109 @@ function createEarth(scene) {
   );
   scene.add(farGlow);
 
+  // Atmosphere: thin fresnel halo (blue/white edge glow) so Earth reads as a planet
+  const atmosphereRadius = 1.022;
+  const atmosphereMat = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    side: THREE.BackSide,
+    uniforms: {
+      glowColor: { value: new THREE.Color(0xaaddff) },
+      innerColor: { value: new THREE.Color(0x4488cc) },
+      glowPower: { value: 3.5 },
+    },
+    vertexShader: `
+      varying vec3 vNormal;
+      varying vec3 vViewPosition;
+      void main() {
+        vNormal = normalize(normalMatrix * normal);
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        vViewPosition = -mv.xyz;
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 glowColor;
+      uniform vec3 innerColor;
+      uniform float glowPower;
+      varying vec3 vNormal;
+      varying vec3 vViewPosition;
+      void main() {
+        vec3 viewDir = normalize(vViewPosition);
+        float fresnel = pow(1.0 - max(dot(viewDir, vNormal), 0.0), glowPower);
+        float alpha = 0.02 + 0.35 * fresnel;
+        vec3 col = mix(innerColor, glowColor, fresnel);
+        gl_FragColor = vec4(col, alpha);
+      }
+    `,
+  });
+  const atmosphere = new THREE.Mesh(new THREE.SphereGeometry(atmosphereRadius, 32, 32), atmosphereMat);
+  scene.add(atmosphere);
+
+  // Optional: low-res Earth texture overlay (keep geometric look dominant)
+  const texLoader = new THREE.TextureLoader();
+  texLoader.load('earth-map.jpg', (tex) => {
+    tex.colorSpace = THREE.SRGBColorSpace;
+    const overlayGeo = new THREE.SphereGeometry(1.008, 64, 32);
+    const overlayMat = new THREE.MeshBasicMaterial({
+      map: tex,
+      transparent: true,
+      opacity: 0.42,
+      depthWrite: true,
+      side: THREE.DoubleSide,
+    });
+    const overlay = new THREE.Mesh(overlayGeo, overlayMat);
+    scene.add(overlay);
+  }, undefined, () => { /* optional: no earth-map.jpg */ });
+
   timeEnd('createEarth');
-  return { earth, earthCore, coreWire, glow, innerGlow, outerGlow, farGlow, wireframe };
+  return { earth, earthCore, coreWire, glow, innerGlow, outerGlow, farGlow, wireframe, atmosphere };
+}
+
+function createStarfield(scene) {
+  const STAR_COUNT = 2800;
+  const RADIUS = 88;
+  const geo = new THREE.BufferGeometry();
+  const pos = new Float32Array(STAR_COUNT * 3);
+  const rng = mulberry32(999);
+  for (let i = 0; i < STAR_COUNT; i++) {
+    const theta = rng() * Math.PI * 2;
+    const phi = Math.acos(2 * rng() - 1);
+    const r = RADIUS * (0.97 + 0.06 * rng());
+    const x = r * Math.sin(phi) * Math.cos(theta);
+    const y = r * Math.sin(phi) * Math.sin(theta);
+    const z = r * Math.cos(phi);
+    pos[i * 3] = x;
+    pos[i * 3 + 1] = y;
+    pos[i * 3 + 2] = z;
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  const canvas = document.createElement('canvas');
+  canvas.width = 32;
+  canvas.height = 32;
+  const ctx = canvas.getContext('2d');
+  const g = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+  g.addColorStop(0, 'rgba(255,255,255,1)');
+  g.addColorStop(0.15, 'rgba(255,255,255,0.9)');
+  g.addColorStop(0.5, 'rgba(220,230,255,0.5)');
+  g.addColorStop(1, 'rgba(200,210,255,0)');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 32, 32);
+  const starTex = new THREE.CanvasTexture(canvas);
+  const mat = new THREE.PointsMaterial({
+    map: starTex,
+    color: 0xffffff,
+    size: 0.35,
+    sizeAttenuation: true,
+    transparent: true,
+    opacity: 0.9,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  });
+  const stars = new THREE.Points(geo, mat);
+  stars.frustumCulled = false;
+  scene.add(stars);
+  return stars;
 }
 
 function createParticles(items, scene) {
@@ -322,18 +572,37 @@ function createParticles(items, scene) {
   const rand = () => 0.8 + 0.5 * Math.random();
   const isNatural = (item) => (item && item.type) === 'Natural satellite';
   const isMoon = (name) => (name || '').toUpperCase() === 'MOON';
+  const typeToColor = {
+    'Natural satellite': [1, 1, 1],
+    'Space station': [0.9, 0.95, 1],
+    'Satellite': [1, 0.96, 0.88],
+    'Satellite / spacecraft': [1, 0.97, 0.9],
+    'Payload': [0.95, 0.98, 1],
+    'Rocket body': [1, 0.9, 0.75],
+    'Debris': [0.92, 0.85, 0.78],
+    'Space debris': [0.92, 0.85, 0.78],
+  };
+  const typeToSize = {
+    'Natural satellite': 0.06,
+    'Space station': 0.11,
+    'Satellite': 0.088,
+    'Satellite / spacecraft': 0.09,
+    'Payload': 0.085,
+    'Rocket body': 0.082,
+    'Debris': 0.072,
+    'Space debris': 0.072,
+  };
   for (let i = 0; i < count; i++) {
     pos[i * 3] = 0;
     pos[i * 3 + 1] = 0;
     pos[i * 3 + 2] = 0;
-    sizes[i] = isMoon(items[i].name) ? 0.06 : 0.09 * rand();
-    if (isNatural(items[i])) {
-      // Natural objects (currently just the Moon) stay white
-      colors[i * 3] = 1; colors[i * 3 + 1] = 1; colors[i * 3 + 2] = 1;
-    } else {
-      // Man-made objects back to warm white/yellow glow
-      colors[i * 3] = 1; colors[i * 3 + 1] = 0.96; colors[i * 3 + 2] = 0.82;
-    }
+    const type = items[i].type || 'Satellite';
+    const sizeBase = typeToSize[type] ?? 0.085;
+    sizes[i] = isMoon(items[i].name) ? 0.06 : sizeBase * rand();
+    const rgb = typeToColor[type] ?? typeToColor['Satellite'];
+    colors[i * 3] = rgb[0];
+    colors[i * 3 + 1] = rgb[1];
+    colors[i * 3 + 2] = rgb[2];
   }
   const baseColors = new Float32Array(colors.length);
   baseColors.set(colors);
@@ -586,10 +855,11 @@ function createOrbitRings(items, scene) {
   return group;
 }
 
-(() => {
+(async () => {
   log('init start');
   const loadingEl = document.getElementById('loading');
   try {
+  soundController.init();
   time('init total');
   const container = document.getElementById('canvas-container');
   if (!container) log('warn: #canvas-container not found');
@@ -633,7 +903,8 @@ function createOrbitRings(items, scene) {
   controls.autoRotateSpeed = 0.25;
 
   createEarth(scene);
-  const items = loadOrbitalData();
+  createStarfield(scene);
+  const items = await loadOrbitalData();
   const { points, geo, baseColors, scaleMultiplier } = createParticles(items, scene);
   const moonMesh = createMoonMesh(scene, items);
   createOrbitTrails(items, scene);
@@ -642,6 +913,15 @@ function createOrbitRings(items, scene) {
   const tooltipName = tooltip.querySelector('.name');
   const tooltipType = tooltip.querySelector('.type');
   const tooltipDetail = tooltip.querySelector('.detail');
+  const soundCheckbox = document.getElementById('sound-checkbox');
+  if (soundCheckbox) {
+    soundCheckbox.checked = soundController.enabled;
+    soundCheckbox.addEventListener('change', () => {
+      soundController.setEnabled(soundCheckbox.checked);
+      if (soundCheckbox.checked) soundController.playAmbient();
+      else soundController.stopAmbient();
+    });
+  }
   const raycaster = new THREE.Raycaster();
   raycaster.params.Points = { threshold: 0.06 };
   const mouse = new THREE.Vector2();
@@ -691,7 +971,10 @@ function createOrbitRings(items, scene) {
     mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
     const idx = getObjectUnderPoint(mouse.x, mouse.y);
     selectedIndex = idx >= 0 ? idx : -1;
-    if (idx >= 0) event.stopPropagation();
+    if (idx >= 0) {
+      soundController.playClick();
+      event.stopPropagation();
+    }
   }
   container.addEventListener('pointerdown', onPointerDown, true);
 
@@ -751,7 +1034,7 @@ function createOrbitRings(items, scene) {
       const obj = items[selectedIndex];
       tooltipName.textContent = obj.name;
       tooltipType.textContent = obj.type;
-      tooltipDetail.textContent = obj.type === 'Natural satellite' ? 'Orbiting Earth • Natural satellite' : `Orbiting Earth • Catalogued object`;
+      tooltipDetail.textContent = 'Orbiting Earth • ' + (obj.type || 'Object');
       tooltip.classList.add('visible');
       tooltip.style.left = `${window.innerWidth - 336}px`;
       tooltip.style.top = `${window.innerHeight - 120}px`;

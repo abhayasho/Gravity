@@ -32,6 +32,20 @@
     #tooltip .name { font-family: 'Orbitron', sans-serif; font-weight: 600; font-size: 15px; margin-bottom: 6px; color: #fff5e0; }
     #tooltip .type { text-transform: uppercase; letter-spacing: 0.12em; font-size: 11px; color: rgba(255,220,150,0.9); margin-bottom: 4px; }
     #tooltip .detail { font-size: 12px; color: rgba(255,230,180,0.85); }
+    #sound-toggle {
+      position: fixed;
+      bottom: 16px;
+      left: 16px;
+      z-index: 50;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: rgba(255,220,150,0.85);
+      font-size: 13px;
+      cursor: pointer;
+      user-select: none;
+    }
+    #sound-toggle input { cursor: pointer; }
     #loading {
       position: fixed;
       top: 0; left: 0; right: 0; bottom: 0;
@@ -56,6 +70,10 @@
     <div class="type"></div>
     <div class="detail"></div>
   </div>
+  <label id="sound-toggle" title="Toggle sound">
+    <input type="checkbox" id="sound-checkbox" />
+    <span>Sound</span>
+  </label>
   <div id="loading">
     <div class="spinner"></div>
     <p>Loading…</p>
@@ -64,9 +82,6 @@
   <script>
     (function() {
       console.log('[Gravity] HTML loaded, waiting for main.js module…');
-      var loader = document.getElementById('loading');
-      function hide() { if (loader) loader.classList.add('hidden'); }
-      setTimeout(function() { hide(); console.log('[Gravity] Loading overlay force-hidden after 2.5s'); }, 2500);
     })();
   </script>
   <script type="importmap">
